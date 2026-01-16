@@ -61,6 +61,7 @@ for epoch in range(config.num_epochs):
         global_step += 1
     if accelerator.is_local_main_process:
         model.eval()
+        unwrapped_model = accelerator.unwrap_model(model)
         with torch.no_grad():
             sample_noise = torch.randn(
                 (config.eval_batch_size, 4, config.latent_size, config.latent_size),
@@ -73,7 +74,7 @@ for epoch in range(config.num_epochs):
             null_classes = torch.tensor([num_classes] * config.eval_batch_size, device=device)
             labels = torch.cat([guided_classes, null_classes], dim=0)
             def model_wrapper(x, t, **kwargs):
-                return model.forward_with_cfg(x, t, kwargs['y'], kwargs['cfg_scale'])
+                return unwrapped_model.forward_with_cfg(x, t, kwargs['y'], kwargs['cfg_scale'])
             
             model_kwargs = dict(y=labels, cfg_scale=4.0)
             samples = diffusion.p_sample_loop(
@@ -88,5 +89,5 @@ for epoch in range(config.num_epochs):
             samples, _ = samples.chunk(2, dim=0)
             decoded = vae.decode(samples / 0.18215).sample
         save_image(decoded, os.path.join(config.output_dir, "samples", f"{global_step}.png"), nrow=8, normalize=True, value_range=(-1, 1))
-        unwrapped_model = accelerator.unwrap_model(model)
         torch.save(unwrapped_model.state_dict(), os.path.join(config.output_dir, "model.pth"))
+accelerator.end_training()
