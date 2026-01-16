@@ -59,49 +59,49 @@ def main():
             }
             process_bar.set_postfix(**logs)
             global_step += 1
-            model_instance.eval()
-            with torch.no_grad():
-                sample_noise = torch.randn(
-                    (config.eval_batch_size, 4, config.latent_size, config.latent_size),
-                    device=device,
-                )
-                guided_classes = torch.randint(
-                    low=0, high=num_classes, size=(config.eval_batch_size,), device=device
-                )
-                sample_noise = torch.cat([sample_noise, sample_noise], dim=0)
-                null_classes = torch.tensor(
-                    [num_classes] * config.eval_batch_size, device=device
-                )
-                labels = torch.cat([guided_classes, null_classes], dim=0)
-
-                def model_wrapper(x, t, **kwargs):
-                    return model_instance.forward_with_cfg(
-                        x, t, kwargs["y"], kwargs["cfg_scale"]
-                    )
-
-                model_kwargs = dict(y=labels, cfg_scale=4.0)
-                samples = diffusion.p_sample_loop(
-                    model_wrapper,
-                    sample_noise.shape,
-                    sample_noise,
-                    clip_denoised=False,
-                    model_kwargs=model_kwargs,
-                    progress=True,
-                    device=device,
-                )
-                samples, _ = samples.chunk(2, dim=0)
-                decoded = vae.decode(samples / 0.18215).sample
-            save_image(
-                decoded,
-                os.path.join(config.output_dir, "samples", f"{global_step}.png"),
-                nrow=8,
-                normalize=True,
-                value_range=(-1, 1),
+        model_instance.eval()
+        with torch.no_grad():
+            sample_noise = torch.randn(
+                (config.eval_batch_size, 4, config.latent_size, config.latent_size),
+                device=device,
             )
-            torch.save(
-                model_instance.state_dict(),
-                os.path.join(config.output_dir, "model.pth"),
+            guided_classes = torch.randint(
+                low=0, high=num_classes, size=(config.eval_batch_size,), device=device
             )
+            sample_noise = torch.cat([sample_noise, sample_noise], dim=0)
+            null_classes = torch.tensor(
+                [num_classes] * config.eval_batch_size, device=device
+            )
+            labels = torch.cat([guided_classes, null_classes], dim=0)
+
+            def model_wrapper(x, t, **kwargs):
+                return model_instance.forward_with_cfg(
+                    x, t, kwargs["y"], kwargs["cfg_scale"]
+                )
+
+            model_kwargs = dict(y=labels, cfg_scale=4.0)
+            samples = diffusion.p_sample_loop(
+                model_wrapper,
+                sample_noise.shape,
+                sample_noise,
+                clip_denoised=False,
+                model_kwargs=model_kwargs,
+                progress=True,
+                device=device,
+            )
+            samples, _ = samples.chunk(2, dim=0)
+            decoded = vae.decode(samples / 0.18215).sample
+        save_image(
+            decoded,
+            os.path.join(config.output_dir, "samples", f"{global_step}.png"),
+            nrow=8,
+            normalize=True,
+            value_range=(-1, 1),
+        )
+        torch.save(
+            model_instance.state_dict(),
+            os.path.join(config.output_dir, "model.pth"),
+        )
 
 
 if __name__ == "__main__":
