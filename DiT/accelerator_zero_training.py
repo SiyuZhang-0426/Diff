@@ -3,6 +3,8 @@ from torchvision.utils import save_image
 from diffusers.optimization import get_cosine_schedule_with_warmup
 import os
 from tqdm import tqdm
+from accelerate import Accelerator
+from accelerate.utils import DeepSpeedPlugin
 from diffusion import create_diffusion
 from diffusers.models import AutoencoderKL
 from config import config
@@ -13,8 +15,7 @@ from models import model
 def main():
     os.makedirs(config.output_dir, exist_ok=True)
     os.makedirs(os.path.join(config.output_dir, "samples"), exist_ok=True)
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    model_instance = model.to(device)
+    model_instance = model.cuda()
     diffusion = create_diffusion(timestep_respacing="")
     optimizer = torch.optim.AdamW(model_instance.parameters(), lr=config.learning_rate)
     lr_scheduler = get_cosine_schedule_with_warmup(
@@ -22,15 +23,32 @@ def main():
         num_warmup_steps=config.lr_warmup_steps,
         num_training_steps=(len(dataloader) * config.num_epochs),
     )
-    vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-ema").to(device)
+    deepspeed_plugin = DeepSpeedPlugin(
+        zero_stage=3,
+        gradient_accumulation_steps=config.gradient_accumulation_steps,
+    )
+    accelerator = Accelerator(
+        mixed_precision=config.mixed_precision,
+        gradient_accumulation_steps=config.gradient_accumulation_steps,
+        log_with="tensorboard",
+        project_dir=os.path.join(config.output_dir, "logs"),
+        deepspeed_plugin=deepspeed_plugin,
+    )
+    model_instance, optimizer, dataloader_prepared, lr_scheduler = accelerator.prepare(
+        model_instance, optimizer, dataloader, lr_scheduler
+    )
+    vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-ema").to(accelerator.device)
+    device = accelerator.device
     global_step = 0
     for epoch in range(config.num_epochs):
-        process_bar = tqdm(total=len(dataloader), desc=f"Epoch {epoch}")
-        for steps, batch in enumerate(dataloader):
+        process_bar = tqdm(
+            total=len(dataloader_prepared),
+            disable=not accelerator.is_local_main_process,
+            desc=f"Epoch {epoch}",
+        )
+        for steps, batch in enumerate(dataloader_prepared):
             model_instance.train()
             clean_images, labels = batch
-            clean_images = clean_images.to(device)
-            labels = labels.to(device)
             with torch.no_grad():
                 latent_images = vae.encode(clean_images).latent_dist.sample().mul_(0.18215)
             timesteps = torch.randint(
@@ -41,15 +59,16 @@ def main():
                 dtype=torch.int64,
             )
             model_kwargs = dict(y=labels)
-            loss_dict = diffusion.training_losses(
-                model_instance, latent_images, timesteps, model_kwargs
-            )
-            loss = loss_dict["loss"].mean()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model_instance.parameters(), 1.0)
-            optimizer.step()
-            lr_scheduler.step()
-            optimizer.zero_grad()
+            with accelerator.accumulate(model_instance):
+                loss_dict = diffusion.training_losses(
+                    model_instance, latent_images, timesteps, model_kwargs
+                )
+                loss = loss_dict["loss"].mean()
+                accelerator.backward(loss)
+                accelerator.clip_grad_norm_(model_instance.parameters(), 1.0)
+                optimizer.step()
+                lr_scheduler.step()
+                optimizer.zero_grad()
             process_bar.update(1)
             current_loss = loss.detach().item()
             logs = {
@@ -58,8 +77,11 @@ def main():
                 "step": global_step,
             }
             process_bar.set_postfix(**logs)
+            accelerator.log(logs, step=global_step)
             global_step += 1
+        if accelerator.is_local_main_process:
             model_instance.eval()
+            unwrapped_model = accelerator.unwrap_model(model_instance)
             with torch.no_grad():
                 sample_noise = torch.randn(
                     (config.eval_batch_size, 4, config.latent_size, config.latent_size),
@@ -75,7 +97,7 @@ def main():
                 labels = torch.cat([guided_classes, null_classes], dim=0)
 
                 def model_wrapper(x, t, **kwargs):
-                    return model_instance.forward_with_cfg(
+                    return unwrapped_model.forward_with_cfg(
                         x, t, kwargs["y"], kwargs["cfg_scale"]
                     )
 
@@ -99,10 +121,12 @@ def main():
                 value_range=(-1, 1),
             )
             torch.save(
-                model_instance.state_dict(),
+                unwrapped_model.state_dict(),
                 os.path.join(config.output_dir, "model.pth"),
             )
+    accelerator.end_training()
 
 
 if __name__ == "__main__":
     main()
+
