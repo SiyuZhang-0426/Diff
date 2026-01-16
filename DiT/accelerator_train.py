@@ -28,6 +28,13 @@ def main():
         log_with="tensorboard",
         project_dir=os.path.join(config.output_dir, "logs"),
     )
+    if accelerator.is_local_main_process:
+        if accelerator.state.deepspeed_plugin is not None:
+            accelerator.print(
+                f"Using DeepSpeed ZeRO, stage {accelerator.state.deepspeed_plugin.zero_stage}"
+            )
+        else:
+            accelerator.print("Not using DeepSpeed ZeRO")
     model_instance, optimizer, dataloader_prepared, lr_scheduler = accelerator.prepare(
         model_instance, optimizer, dataloader, lr_scheduler
     )
@@ -70,6 +77,11 @@ def main():
                 "lr": lr_scheduler.get_last_lr()[0],
                 "step": global_step,
             }
+            if device.type == "cuda":
+                current_memory = torch.cuda.memory_allocated(device)
+                max_memory = torch.cuda.max_memory_allocated(device)
+                logs["memory_allocated_mb"] = current_memory / (1024 * 1024)
+                logs["max_memory_allocated_mb"] = max_memory / (1024 * 1024)
             process_bar.set_postfix(**logs)
             accelerator.log(logs, step=global_step)
             global_step += 1
